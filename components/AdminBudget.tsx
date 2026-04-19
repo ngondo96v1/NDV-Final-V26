@@ -2,16 +2,17 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import { TrendingUp, Wallet, AlertTriangle, ChevronLeft, Save, X, Check, Plus, Minus, History, Calendar, ArrowUpRight, ArrowDownLeft, Info, ChevronRight } from 'lucide-react';
-import { BudgetLog } from '../types';
+import { BudgetLog, AppSettings } from '../types';
 
 interface AdminBudgetProps {
   currentBudget: number;
   logs: BudgetLog[];
   onUpdateBudget: (type: BudgetLog['type'], amount: number, note: string) => Promise<void>;
   onBack: () => void;
+  settings: AppSettings;
 }
 
-const AdminBudget: React.FC<AdminBudgetProps> = ({ currentBudget, logs, onUpdateBudget, onBack }) => {
+const AdminBudget: React.FC<AdminBudgetProps> = ({ currentBudget, logs, onUpdateBudget, onBack, settings }) => {
   const [activeTab, setActiveTab] = useState<'ADD' | 'WITHDRAW'>('ADD');
   const [inputValue, setInputValue] = useState('');
   const [numericValue, setNumericValue] = useState(0);
@@ -19,10 +20,31 @@ const AdminBudget: React.FC<AdminBudgetProps> = ({ currentBudget, logs, onUpdate
   const [showConfirm, setShowConfirm] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 5;
+  const itemsPerPage = 8;
 
   const totalPages = Math.ceil(logs.length / itemsPerPage);
   const displayedLogs = logs.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+
+  const formatLogNote = (note: string) => {
+    if (!note) return 'Giao dịch hệ thống';
+    let formattedNote = note;
+    
+    // Resolve rank IDs in log notes
+    if (settings.RANK_CONFIG && settings.RANK_CONFIG.length > 0) {
+      settings.RANK_CONFIG.forEach(rank => {
+        if (rank.id && rank.name) {
+          // Replace both standalone and parenthesized IDs
+          formattedNote = formattedNote.replace(new RegExp(`\\(${rank.id}\\)`, 'g'), `(${rank.name})`);
+          formattedNote = formattedNote.replace(new RegExp(`Nâng hạng ${rank.id}`, 'gi'), `Nâng hạng ${rank.name}`);
+          // Fallback simple replacement if it's just the ID
+          if (formattedNote.includes(rank.id) && !formattedNote.includes(rank.name)) {
+             formattedNote = formattedNote.replace(rank.id, rank.name);
+          }
+        }
+      });
+    }
+    return formattedNote;
+  };
 
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const rawVal = e.target.value.replace(/\D/g, '');
@@ -223,7 +245,7 @@ const AdminBudget: React.FC<AdminBudgetProps> = ({ currentBudget, logs, onUpdate
                             {new Date(log.createdAt).toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
                           </span>
                         </div>
-                        <p className="text-[9px] font-bold text-white tracking-tight line-clamp-1">{log.note}</p>
+                        <p className="text-[9px] font-bold text-white tracking-tight line-clamp-1">{formatLogNote(log.note)}</p>
                       </div>
                     </div>
                     <div className="text-right space-y-0">

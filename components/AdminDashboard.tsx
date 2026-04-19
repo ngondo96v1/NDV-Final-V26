@@ -149,6 +149,27 @@ const AdminDashboard: React.FC<AdminDashboardProps> = React.memo(({
 
   const isBudgetAlarm = useMemo(() => systemBudget <= Number(settings.MIN_SYSTEM_BUDGET || 2000000), [systemBudget, settings.MIN_SYSTEM_BUDGET]);
 
+  const formatLogNote = (note: string) => {
+    if (!note) return 'Giao dịch hệ thống';
+    let formattedNote = note;
+    
+    // Resolve rank IDs in log notes
+    if (settings.RANK_CONFIG && settings.RANK_CONFIG.length > 0) {
+      settings.RANK_CONFIG.forEach(rank => {
+        if (rank.id && rank.name) {
+          // Replace both standalone and parenthesized IDs
+          formattedNote = formattedNote.replace(new RegExp(`\\(${rank.id}\\)`, 'g'), `(${rank.name})`);
+          formattedNote = formattedNote.replace(new RegExp(`Nâng hạng ${rank.id}`, 'gi'), `Nâng hạng ${rank.name}`);
+          // Fallback simple replacement if it's just the ID
+          if (formattedNote.includes(rank.id) && !formattedNote.includes(rank.name)) {
+             formattedNote = formattedNote.replace(rank.id, rank.name);
+          }
+        }
+      });
+    }
+    return formattedNote;
+  };
+
   const securityAudit = useMemo(() => {
     const issues = [];
     if (settings.JWT_SECRET === 'your-secret-key') issues.push('JWT Secret mặc định');
@@ -451,7 +472,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = React.memo(({
                         {log.type === 'ADD' || log.type === 'LOAN_REPAY' || log.type === 'INITIAL' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
                       </div>
                       <div>
-                        <p className="text-[8px] font-black text-white leading-tight">{log.note || 'Giao dịch hệ thống'}</p>
+                        <p className="text-[8px] font-black text-white leading-tight">{formatLogNote(log.note)}</p>
                         <p className="text-[6px] font-bold text-gray-500 uppercase mt-0.5">
                           {new Date(log.createdAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })} • {new Date(log.createdAt).toLocaleDateString('vi-VN')}
                         </p>

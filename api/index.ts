@@ -3342,12 +3342,14 @@ router.post("/payment/webhook", async (req, res) => {
 
             // Create Budget Log for Rank Upgrade
             const budgetLogId = `BL${Date.now()}`;
+            const rankLabel = targetConfig ? targetConfig.name : targetRank.toUpperCase();
+            
             const budgetLog = {
               id: budgetLogId,
               type: 'ADD',
               amount: upgradeFee,
               balanceAfter: newBudget,
-              note: `[Tự động] PayOS: Nâng hạng ${targetRank.toUpperCase()} cho ${user.fullName || user.phone}`,
+              note: `[Tự động] PayOS: Nâng hạng ${rankLabel} cho ${user.fullName || user.phone}`,
               createdAt: new Date().toISOString()
             };
             await client.from('budget_logs').insert([budgetLog]);
@@ -3363,15 +3365,15 @@ router.post("/payment/webhook", async (req, res) => {
 
               io.to(`user_${user.id}`).emit("payment_success", { 
                 type: 'UPGRADE',
-                message: `Chúc mừng! Bạn đã được nâng hạng lên ${targetRank.toUpperCase()} thành công!` 
+                message: `Chúc mừng! Bạn đã được nâng hạng lên ${rankLabel} thành công!` 
               });
               io.to(`user_${user.id}`).emit("rank_upgrade_success", { 
                 rank: targetRank, 
-                message: `Chúc mừng! Bạn đã được nâng hạng lên ${targetRank.toUpperCase()} thành công!` 
+                message: `Chúc mừng! Bạn đã được nâng hạng lên ${rankLabel} thành công!` 
               });
               io.to("admin").emit("admin_notification", {
                 type: "RANK_UPGRADE",
-                message: `Người dùng ${user.id} đã nâng hạng lên ${targetRank.toUpperCase()} qua PayOS.`
+                message: `Người dùng ${user.id} đã nâng hạng lên ${rankLabel} qua PayOS.`
               });
               
               // Notify admin of config changes
@@ -3384,7 +3386,6 @@ router.post("/payment/webhook", async (req, res) => {
 
             // Add persistent notification
             const notifId = `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-            const rankLabel = targetRank.toUpperCase();
             const rankBenefit = settings.RANK_CONFIG?.find((r: any) => r.id === targetRank.toLowerCase())?.maxLimit;
             const benefitMsg = rankBenefit ? ` Hạn mức vay của bạn đã được nâng lên tối đa ${rankBenefit.toLocaleString()} đ.` : '';
 

@@ -2500,12 +2500,19 @@ const App: React.FC = () => {
         let updatedBudgetLogs = [...budgetLogs];
         let newBudgetLog: BudgetLog | undefined = undefined;
         if (upgradeFee > 0) {
+          const rankNames: Record<string, string> = {};
+          settings.RANK_CONFIG?.forEach(r => {
+            rankNames[r.id] = r.name;
+          });
+          const rankId = targetUser.pendingUpgradeRank || '';
+          const rankName = rankNames[rankId] || rankId;
+
           newBudgetLog = {
             id: `BL${Date.now()}`,
             type: 'ADD',
             amount: upgradeFee,
             balanceAfter: newBudget,
-            note: `Phí nâng hạng từ ${targetUser.fullName} (${targetUser.pendingUpgradeRank})`,
+            note: `Phí nâng hạng từ ${targetUser.fullName} (${rankName})`,
             createdAt: new Date().toISOString()
           };
           updatedBudgetLogs = [newBudgetLog, ...updatedBudgetLogs];
@@ -3201,6 +3208,7 @@ const App: React.FC = () => {
             logs={budgetLogs}
             onUpdateBudget={handleUpdateBudget}
             onBack={() => setCurrentView(AppView.ADMIN_DASHBOARD)} 
+            settings={settings}
           />
         );
       case AppView.ADMIN_SYSTEM:
