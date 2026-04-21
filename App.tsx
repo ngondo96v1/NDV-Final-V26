@@ -165,38 +165,60 @@ const App: React.FC = () => {
   }, []);
 
   const handleUpdateBudget = async (type: BudgetLog['type'], amount: number, note: string) => {
-    let newBudget = systemBudget;
-    if (type === 'INITIAL') {
-      newBudget = amount;
-    } else if (type === 'ADD') {
-      newBudget += amount;
-    } else if (type === 'WITHDRAW') {
-      newBudget -= amount;
-    }
+    let finalBudget = 0;
+    let finalLog: BudgetLog | null = null;
+    const nowStr = new Date().toISOString();
+    const logId = `BL${Date.now()}`;
 
-    setSystemBudget(newBudget);
-    localStorage.setItem('ndv_budget', newBudget.toString());
+    // Update system budget first using functional update
+    setSystemBudget(prevBudget => {
+      let nextBudget = prevBudget;
+      if (type === 'INITIAL') {
+        nextBudget = amount;
+      } else if (type === 'ADD') {
+        nextBudget += amount;
+      } else if (type === 'WITHDRAW') {
+        nextBudget -= amount;
+      }
+      
+      finalBudget = nextBudget;
+      localStorage.setItem('ndv_budget', nextBudget.toString());
+      
+      finalLog = {
+        id: logId,
+        type,
+        amount,
+        balanceAfter: nextBudget,
+        note,
+        createdAt: nowStr
+      };
 
-    const newLog: BudgetLog = {
-      id: `BL${Date.now()}`,
-      type,
-      amount,
-      balanceAfter: newBudget,
-      note,
-      createdAt: new Date().toISOString()
-    };
+      return nextBudget;
+    });
 
-    const updatedLogs = [newLog, ...budgetLogs];
-    setBudgetLogs(updatedLogs);
-    localStorage.setItem('ndv_budget_logs', JSON.stringify(updatedLogs));
-
-    try {
-      await authenticatedFetch('/api/budget', {
-        method: 'POST',
-        body: JSON.stringify({ budget: newBudget, log: newLog })
+    // Update logs after budget state update is queued
+    if (finalLog) {
+      const logToSave = finalLog; // Capture for closure
+      setBudgetLogs(prevLogs => {
+        const updatedLogs = [logToSave, ...prevLogs];
+        localStorage.setItem('ndv_budget_logs', JSON.stringify(updatedLogs));
+        return updatedLogs;
       });
-    } catch (e) {
-      console.error("Lỗi cập nhật ngân sách:", e);
+
+      // Async sync to server
+      try {
+        await authenticatedFetch('/api/budget', {
+          method: 'POST',
+          body: JSON.stringify({ 
+            type, 
+            amount, 
+            log: logToSave,
+            budget: finalBudget // Fallback for backward compatibility
+          })
+        });
+      } catch (e) {
+        console.error("Lỗi cập nhật ngân sách:", e);
+      }
     }
   };
 
@@ -1015,19 +1037,19 @@ const App: React.FC = () => {
       // Handle both array of {key, value} and full settings object
       if (Array.isArray(data)) {
         data.forEach(c => {
-          if (c.key === 'budget') {
+          if (c.key === 'budget' || c.key === 'SYSTEM_BUDGET') {
             setSystemBudget(c.value);
             localStorage.setItem('ndv_budget', c.value.toString());
           }
-          if (c.key === 'rankProfit') {
+          if (c.key === 'rankProfit' || c.key === 'TOTAL_RANK_PROFIT') {
             setRankProfit(c.value);
             localStorage.setItem('ndv_rank_profit', c.value.toString());
           }
-          if (c.key === 'loanProfit') {
+          if (c.key === 'loanProfit' || c.key === 'TOTAL_LOAN_PROFIT') {
             setLoanProfit(c.value);
             localStorage.setItem('ndv_loan_profit', c.value.toString());
           }
-          if (c.key === 'monthlyStats') {
+          if (c.key === 'monthlyStats' || c.key === 'MONTHLY_STATS') {
             const sliced = c.value.slice(0, 6);
             setMonthlyStats(sliced);
             localStorage.setItem('ndv_monthly_stats', JSON.stringify(sliced));
@@ -2016,7 +2038,7 @@ const App: React.FC = () => {
       let newLoans = [...loans];
       let newRegisteredUsers = [...registeredUsers];
       let usersUpdated = false;
-      let newBudget = systemBudget;
+      let budgetDelta = 0;
 
       const loanIdx = newLoans.findIndex(l => l.id === loanId);
       if (loanIdx === -1) {
@@ -2052,7 +2074,7 @@ const App: React.FC = () => {
       let newStatus = loan.status;
       let rejectionReason = action === 'REJECT' ? (reason || loan.rejectionReason) : null;
 
-      if (action === 'DISBURSE') newBudget -= (loan.amount * (1 - Number(settings.PRE_DISBURSEMENT_FEE || 0) / 100)); // Only deduct disbursed amount (fee kept in budget)
+      if (action === 'DISBURSE') budgetDelta = -(loan.amount * (1 - Number(settings.PRE_DISBURSEMENT_FEE || 0) / 100)); // Only deduct disbursed amount (fee kept in budget)
       else if (action === 'SETTLE') {
         // Recalculate fine for 100% accuracy at settlement time to ensure budget matches exact rounded amount
         const fRate = Number(settings.FINE_RATE || 0.1) / 100;
@@ -2077,15 +2099,15 @@ const App: React.FC = () => {
 
         if (loan.settlementType === 'PRINCIPAL') {
           // Vay Gốc: Pay fee + fines
-          newBudget += ((loan.amount * (Number(settings.PRE_DISBURSEMENT_FEE || 0) / 100)) + (loan.fine || 0));
+          budgetDelta = ((loan.amount * (Number(settings.PRE_DISBURSEMENT_FEE || 0) / 100)) + (loan.fine || 0));
         } else if (loan.settlementType === 'PARTIAL') {
           // Tất toán 1 phần: Pay partial principal + fee on remaining principal + fines
           const pAmount = loan.partialAmount || 0;
           const remainingPrincipal = loan.amount - pAmount;
-          newBudget += (pAmount + (remainingPrincipal * (Number(settings.PRE_DISBURSEMENT_FEE || 0) / 100)) + (loan.fine || 0));
+          budgetDelta = (pAmount + (remainingPrincipal * (Number(settings.PRE_DISBURSEMENT_FEE || 0) / 100)) + (loan.fine || 0));
         } else {
           // Tất Cả: Pay principal + fines - voucherDiscount
-          newBudget += Math.max(0, (loan.amount + (loan.fine || 0)) - voucherDiscount);
+          budgetDelta = Math.max(0, (loan.amount + (loan.fine || 0)) - voucherDiscount);
         }
       }
 
@@ -2336,8 +2358,16 @@ const App: React.FC = () => {
       // Persist to server using sync endpoint - Targeted sync for bandwidth
       const syncLoans = nextLoan ? [updatedLoan, nextLoan] : [updatedLoan];
       
+      // Calculate final budget safely using functional update pattern
+      const calculatedBudget = systemBudget + budgetDelta;
+      
+      setSystemBudget(prev => {
+        const next = prev + budgetDelta;
+        localStorage.setItem('ndv_budget', next.toString());
+        return next;
+      });
+
       // Record budget log for disburse/settle
-      let updatedBudgetLogs = [...budgetLogs];
       let newBudgetLog: BudgetLog | undefined = undefined;
       
       if (action === 'DISBURSE') {
@@ -2346,27 +2376,34 @@ const App: React.FC = () => {
           id: `BL${Date.now()}`,
           type: 'LOAN_DISBURSE',
           amount: disburseAmount,
-          balanceAfter: newBudget,
+          balanceAfter: calculatedBudget,
           note: `Giải ngân khoản vay ${loan.id} cho ${loan.userName}`,
           createdAt: new Date().toISOString()
         };
-        updatedBudgetLogs = [newBudgetLog, ...updatedBudgetLogs];
+        setBudgetLogs(prev => {
+          const next = [newBudgetLog!, ...prev];
+          localStorage.setItem('ndv_budget_logs', JSON.stringify(next));
+          return next;
+        });
       } else if (action === 'SETTLE') {
-        const repayAmount = newBudget - systemBudget;
         newBudgetLog = {
           id: `BL${Date.now()}`,
           type: 'LOAN_REPAY',
-          amount: repayAmount,
-          balanceAfter: newBudget,
+          amount: budgetDelta,
+          balanceAfter: calculatedBudget,
           note: `Thu hồi khoản vay ${loan.id} từ ${loan.userName} (${loan.settlementType === 'PRINCIPAL' ? 'Gia hạn' : loan.settlementType === 'PARTIAL' ? 'TTMP' : 'Tất toán'})`,
           createdAt: new Date().toISOString()
         };
-        updatedBudgetLogs = [newBudgetLog, ...updatedBudgetLogs];
+        setBudgetLogs(prev => {
+          const next = [newBudgetLog!, ...prev];
+          localStorage.setItem('ndv_budget_logs', JSON.stringify(next));
+          return next;
+        });
       }
 
       const syncData = {
         loans: syncLoans, // Only the changed loans
-        budget: newBudget,
+        budgetDelta: (action === 'SETTLE' || action === 'DISBURSE') ? budgetDelta : undefined,
         budgetLog: newBudgetLog,
         users: usersUpdated ? [newRegisteredUsers.find(u => u.id === loan.userId)] : undefined,
         loanProfit: (action === 'SETTLE' || action === 'DISBURSE') ? loanProfitToSync : undefined,
@@ -2384,15 +2421,9 @@ const App: React.FC = () => {
 
       // Update local state ONLY after successful sync for Admin
       setLoans(newLoans);
-      setSystemBudget(newBudget);
       setLoanProfit(loanProfitToSync);
       setMonthlyStats(monthlyStatsToSync);
       
-      if (newBudgetLog) {
-        setBudgetLogs(updatedBudgetLogs);
-        localStorage.setItem('ndv_budget_logs', JSON.stringify(updatedBudgetLogs));
-      }
-
       if (usersUpdated) {
         setRegisteredUsers(newRegisteredUsers);
         if (user && !user.isAdmin) {
@@ -2514,31 +2545,38 @@ const App: React.FC = () => {
       }
 
       if (updatedUser) {
-        const upgradeFee = action === 'APPROVE_RANK' ? (updatedUser.totalLimit * (settings.UPGRADE_PERCENT / 100)) : 0;
-        const newBudget = systemBudget + upgradeFee;
+        const upgradeFeeSize = action === 'APPROVE_RANK' ? (updatedUser.totalLimit * (Number(settings.UPGRADE_PERCENT || 0) / 100)) : 0;
+        const calculatedBudget = systemBudget + upgradeFeeSize;
+        
+        if (upgradeFeeSize > 0) {
+          setSystemBudget(prev => {
+            const next = prev + upgradeFeeSize;
+            localStorage.setItem('ndv_budget', next.toString());
+            return next;
+          });
+        }
         
         let newRankProfit = rankProfit;
         let newMonthlyStats = [...monthlyStats];
 
-        if (upgradeFee > 0) {
-          newRankProfit += upgradeFee;
+        if (upgradeFeeSize > 0) {
+          newRankProfit += upgradeFeeSize;
           const now = new Date();
           const monthKey = `${(now.getMonth() + 1).toString().padStart(2, '0')}/${now.getFullYear()}`;
           const existingIdx = newMonthlyStats.findIndex(s => s.month === monthKey);
           if (existingIdx !== -1) {
             const stat = { ...newMonthlyStats[existingIdx] };
-            stat.rankProfit += upgradeFee;
+            stat.rankProfit += upgradeFeeSize;
             stat.totalProfit = stat.rankProfit + stat.loanProfit;
             newMonthlyStats[existingIdx] = stat;
           } else {
-            newMonthlyStats = [{ month: monthKey, rankProfit: upgradeFee, loanProfit: 0, totalProfit: upgradeFee }, ...newMonthlyStats].slice(0, 6);
+            newMonthlyStats = [{ month: monthKey, rankProfit: upgradeFeeSize, loanProfit: 0, totalProfit: upgradeFeeSize }, ...newMonthlyStats].slice(0, 6);
           }
         }
 
         // Persist to server using sync endpoint - Targeted sync
-        let updatedBudgetLogs = [...budgetLogs];
         let newBudgetLog: BudgetLog | undefined = undefined;
-        if (upgradeFee > 0) {
+        if (upgradeFeeSize > 0) {
           const rankNames: Record<string, string> = {};
           settings.RANK_CONFIG?.forEach(r => {
             rankNames[r.id] = r.name;
@@ -2549,20 +2587,24 @@ const App: React.FC = () => {
           newBudgetLog = {
             id: `BL${Date.now()}`,
             type: 'ADD',
-            amount: upgradeFee,
-            balanceAfter: newBudget,
+            amount: upgradeFeeSize,
+            balanceAfter: calculatedBudget,
             note: `Phí nâng hạng từ ${targetUser.fullName} (${rankName})`,
             createdAt: new Date().toISOString()
           };
-          updatedBudgetLogs = [newBudgetLog, ...updatedBudgetLogs];
+          setBudgetLogs(prev => {
+            const next = [newBudgetLog!, ...prev];
+            localStorage.setItem('ndv_budget_logs', JSON.stringify(next));
+            return next;
+          });
         }
 
         const syncData = {
           users: [updatedUser], // Only the changed user
-          budget: upgradeFee > 0 ? newBudget : undefined,
+          budgetDelta: upgradeFeeSize > 0 ? upgradeFeeSize : undefined,
           budgetLog: newBudgetLog,
-          rankProfit: upgradeFee > 0 ? newRankProfit : undefined,
-          monthlyStats: upgradeFee > 0 ? newMonthlyStats : undefined
+          rankProfit: upgradeFeeSize > 0 ? newRankProfit : undefined,
+          monthlyStats: upgradeFeeSize > 0 ? newMonthlyStats : undefined
         };
 
         const response = await authenticatedFetch('/api/sync', {
@@ -2580,15 +2622,9 @@ const App: React.FC = () => {
           // If admin happens to be the one edited (shared session or dev test), preserve admin status
           setUser({ ...updatedUser, isAdmin: user.isAdmin });
         }
-        if (upgradeFee > 0) {
-          setSystemBudget(newBudget);
+        if (upgradeFeeSize > 0) {
           setRankProfit(newRankProfit);
           setMonthlyStats(newMonthlyStats);
-          
-          if (newBudgetLog) {
-            setBudgetLogs(updatedBudgetLogs);
-            localStorage.setItem('ndv_budget_logs', JSON.stringify(updatedBudgetLogs));
-          }
         }
       }
     } catch (e: any) {
@@ -2785,7 +2821,7 @@ const App: React.FC = () => {
       // Sync everything
       const syncData = {
         loans: [finalLoan],
-        budget: financialUpdated ? newBudget : undefined,
+        budgetDelta: financialUpdated ? budgetDiff : undefined,
         budgetLog: newBudgetLog,
         users: finalUser ? [finalUser] : undefined,
         loanProfit: financialUpdated ? nextLoanProfit : undefined,
@@ -2801,12 +2837,20 @@ const App: React.FC = () => {
 
       // Update local states if sync was successful
       if (financialUpdated) {
-        setSystemBudget(newBudget);
+        setSystemBudget(prev => {
+          const next = prev + budgetDiff;
+          localStorage.setItem('ndv_budget', next.toString());
+          return next;
+        });
         setLoanProfit(nextLoanProfit);
         setMonthlyStats(nextMonthlyStats);
         if (newBudgetLog) {
-          setBudgetLogs(prev => [newBudgetLog!, ...prev]);
-          localStorage.setItem('ndv_budget_logs', JSON.stringify([newBudgetLog!, ...budgetLogs]));
+          const logItem = newBudgetLog;
+          setBudgetLogs(prev => {
+            const next = [logItem, ...prev];
+            localStorage.setItem('ndv_budget_logs', JSON.stringify(next));
+            return next;
+          });
         }
       }
       

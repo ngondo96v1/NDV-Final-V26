@@ -2240,12 +2240,33 @@ router.post("/budget", async (req: any, res) => {
     }
     const client = initSupabase();
     if (!client) return res.status(503).json({ error: "Supabase chưa được cấu hình" });
-    const { budget, log } = req.body;
-    const { error } = await client.from('config').upsert({ key: 'SYSTEM_BUDGET', value: budget }, { onConflict: 'key' });
+    const { budget, type, amount, log } = req.body;
+    let finalBudget = budget;
+
+    // Use server-side calculation if type and amount are provided to prevent stale state issues
+    if (type && amount !== undefined && (type === 'ADD' || type === 'WITHDRAW' || type === 'INITIAL')) {
+      const { data: currentBudgetData } = await client.from('config').select('value').eq('key', 'SYSTEM_BUDGET').single();
+      const currentValue = Number(currentBudgetData?.value || 0);
+      
+      if (type === 'ADD') finalBudget = currentValue + amount;
+      else if (type === 'WITHDRAW') finalBudget = currentValue - amount;
+      else if (type === 'INITIAL') finalBudget = amount;
+    }
+
+    const { error } = await client.from('config').upsert({ key: 'SYSTEM_BUDGET', value: finalBudget }, { onConflict: 'key' });
     if (error) throw error;
 
+    // Invalidate cache and emit real-time update
+    settingsCache = null;
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("config_updated", [{ key: 'SYSTEM_BUDGET', value: finalBudget }]);
+    }
+
     if (log) {
-      const sanitizedLog = sanitizeData([log], BUDGET_LOG_COLUMNS)[0];
+      // Ensure log has correct balanceAfter if we recalculated server-side
+      const logToSave = { ...log, balanceAfter: finalBudget };
+      const sanitizedLog = sanitizeData([logToSave], BUDGET_LOG_COLUMNS)[0];
       if (sanitizedLog) {
         await client.from('budget_logs').upsert(sanitizedLog, { onConflict: 'id' });
       }
@@ -2268,6 +2289,14 @@ router.post("/rankProfit", async (req: any, res) => {
     const { rankProfit } = req.body;
     const { error } = await client.from('config').upsert({ key: 'TOTAL_RANK_PROFIT', value: rankProfit }, { onConflict: 'key' });
     if (error) throw error;
+
+    // Invalidate cache and emit real-time update
+    settingsCache = null;
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("config_updated", [{ key: 'TOTAL_RANK_PROFIT', value: rankProfit }]);
+    }
+
     sendSafeJson(res, { success: true });
   } catch (e: any) {
     console.error("Lỗi trong /api/rankProfit:", e);
@@ -2285,6 +2314,14 @@ router.post("/loanProfit", async (req: any, res) => {
     const { loanProfit } = req.body;
     const { error } = await client.from('config').upsert({ key: 'TOTAL_LOAN_PROFIT', value: loanProfit }, { onConflict: 'key' });
     if (error) throw error;
+
+    // Invalidate cache and emit real-time update
+    settingsCache = null;
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("config_updated", [{ key: 'TOTAL_LOAN_PROFIT', value: loanProfit }]);
+    }
+
     sendSafeJson(res, { success: true });
   } catch (e: any) {
     console.error("Lỗi trong /api/loanProfit:", e);
@@ -2302,6 +2339,14 @@ router.post("/monthlyStats", async (req: any, res) => {
     const { monthlyStats } = req.body;
     const { error } = await client.from('config').upsert({ key: 'MONTHLY_STATS', value: monthlyStats }, { onConflict: 'key' });
     if (error) throw error;
+
+    // Invalidate cache and emit real-time update
+    settingsCache = null;
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("config_updated", [{ key: 'MONTHLY_STATS', value: monthlyStats }]);
+    }
+
     sendSafeJson(res, { success: true });
   } catch (e: any) {
     console.error("Lỗi trong /api/monthlyStats:", e);
@@ -2408,14 +2453,14 @@ router.post("/sync", async (req: any, res) => {
   try {
     const client = initSupabase();
     if (!client) return res.status(503).json({ error: "Supabase chưa được cấu hình" });
-    const { users, loans, notifications, budget, budgetLog, rankProfit, loanProfit, monthlyStats } = req.body;
+    const { users, loans, notifications, budget, budgetDelta, budgetLog, rankProfit, loanProfit, monthlyStats } = req.body;
     
     const isAdmin = req.user?.isAdmin === true;
 
     // Security check for non-admin sync
     if (!isAdmin) {
       // Non-admins cannot update system config
-      if (budget !== undefined || budgetLog !== undefined || rankProfit !== undefined || loanProfit !== undefined || monthlyStats !== undefined) {
+      if (budget !== undefined || budgetDelta !== undefined || budgetLog !== undefined || rankProfit !== undefined || loanProfit !== undefined || monthlyStats !== undefined) {
         return res.status(403).json({ error: "Bạn không có quyền cập nhật cấu hình hệ thống" });
       }
       
@@ -2447,8 +2492,15 @@ router.post("/sync", async (req: any, res) => {
     // and ensure data integrity under high load
     
     // 1. Update Config first (Budget is critical)
-    const configUpdates = [];
-    if (budget !== undefined) {
+    const configUpdates: { key: string; value: any }[] = [];
+    let finalPayloadBudget = budget;
+
+    if (budgetDelta !== undefined && budgetDelta !== 0) {
+      const { data: currentBudgetData } = await client.from('config').select('value').eq('key', 'SYSTEM_BUDGET').single();
+      const currentVal = Number(currentBudgetData?.value || 0);
+      finalPayloadBudget = currentVal + budgetDelta;
+      configUpdates.push({ key: 'SYSTEM_BUDGET', value: finalPayloadBudget });
+    } else if (budget !== undefined) {
       // Security: Validate budget change if it's a decrease (disbursement)
       if (budgetLog && budgetLog.type === 'LOAN_DISBURSE') {
         const { data: currentBudgetData } = await client.from('config').select('value').eq('key', 'SYSTEM_BUDGET').single();
