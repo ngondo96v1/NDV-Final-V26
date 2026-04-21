@@ -25,8 +25,8 @@ const AdminSystem = lazy(() => import('./components/AdminSystem'));
 const NotificationModal = lazy(() => import('./components/NotificationModal'));
 const SystemNotificationDrawer = lazy(() => import('./components/SystemNotificationDrawer'));
 const LuckySpin = lazy(() => import('./components/LuckySpin'));
-const ProfileUpdateWarning = lazy(() => import('./components/ProfileUpdateWarning'));
-const DatabaseErrorModal = lazy(() => import('./components/DatabaseErrorModal'));
+import DatabaseErrorModal from './components/DatabaseErrorModal';
+import ProfileUpdateWarning from './components/ProfileUpdateWarning';
 
 const LoadingFallback = () => (
   <div className="h-[100dvh] bg-black flex flex-col items-center justify-center p-8 text-center">
@@ -290,7 +290,9 @@ const App: React.FC = () => {
   });
   const [registeredUsers, setRegisteredUsers] = useState<User[]>(() => {
     const saved = localStorage.getItem('ndv_users');
-    return saved ? JSON.parse(saved) : [];
+    let users = saved ? JSON.parse(saved) : [];
+    // Sanity check: filter out invalid/empty users from local cache
+    return Array.isArray(users) ? users.filter(u => u && u.id && u.phone) : [];
   });
   const [notifications, setNotifications] = useState<Notification[]>(() => {
     const saved = localStorage.getItem('ndv_notifications');
@@ -764,6 +766,13 @@ const App: React.FC = () => {
       });
       if (data.loans) {
         setLoans(prev => {
+          // Admin should also trust server for loans list during full fetch
+          const isFullFetch = fetchFull || isInitial;
+          if (user?.isAdmin && isFullFetch && Array.isArray(data.loans)) {
+            localStorage.setItem('ndv_loans', JSON.stringify(data.loans));
+            return data.loans;
+          }
+
           const next = [...prev];
           data.loans.forEach((l: LoanRecord) => {
             const idx = next.findIndex(existing => existing.id === l.id);
@@ -778,16 +787,38 @@ const App: React.FC = () => {
       }
       if (data.users) {
         setRegisteredUsers(prev => {
-          const next = [...prev];
+          // If the user is an admin, we should be more authoritative and remove users not on server
+          // provided we aren't doing a tiny delta update
+          const isFullFetch = fetchFull || isInitial;
+          
+          if (user?.isAdmin && isFullFetch && Array.isArray(data.users)) {
+            const serverUsers = data.users.filter((u: any) => u && u.id && u.phone && !u.isAdmin);
+            localStorage.setItem('ndv_users', JSON.stringify(serverUsers));
+            return serverUsers;
+          }
+
+          // Non-admin or delta fetch: merge
+          const cleanPrev = prev.filter(u => u && u.id && u.phone);
+          const next = [...cleanPrev];
+          
           data.users.forEach((u: User) => {
+            if (!u || !u.id || !u.phone) return;
+            
             const idx = next.findIndex(existing => existing.id === u.id);
-            if (idx !== -1) next[idx] = { ...next[idx], ...u };
-            else next.push(u);
+            if (idx !== -1) {
+              // Update existing
+              next[idx] = { ...next[idx], ...u };
+            } else {
+              // Add new
+              next.push(u);
+            }
           });
-          // Keep sorted by updated at
-          next.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-          localStorage.setItem('ndv_users', JSON.stringify(next));
-          return next;
+          
+          // Cleanup
+          const finalNext = next.filter(u => u && u.id && u.phone && !u.isAdmin);
+          finalNext.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+          localStorage.setItem('ndv_users', JSON.stringify(finalNext));
+          return finalNext;
         });
       }
       if (data.notifications) {
@@ -1100,6 +1131,14 @@ const App: React.FC = () => {
       // Only redirect to Dashboard if NOT an admin
       if (user && !user.isAdmin) {
         setCurrentView(AppView.DASHBOARD);
+      }
+    });
+
+    socket.on('users_bulk_updated', () => {
+      console.log('[SOCKET] Users bulk updated (Rank Sync)');
+      fetchData(true);
+      if (user?.isAdmin) {
+        fetchFullData(true);
       }
     });
 
@@ -3057,7 +3096,13 @@ const App: React.FC = () => {
       
       const data = await response.json();
       
-      if (data.users) setRegisteredUsers(data.users);
+      if (data.users) {
+        const cleanUsers = Array.isArray(data.users) 
+          ? data.users.filter((u: any) => u && u.id && u.phone && !u.isAdmin)
+          : [];
+        setRegisteredUsers(cleanUsers);
+        localStorage.setItem('ndv_users', JSON.stringify(cleanUsers));
+      }
       if (data.loans) setLoans(data.loans);
       if (data.notifications) setNotifications(deduplicateNotifications(data.notifications));
       if (data.budget !== undefined) setSystemBudget(data.budget);

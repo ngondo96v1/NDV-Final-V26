@@ -888,7 +888,79 @@ router.post("/settings", async (req: any, res) => {
   });
   
   const savedToDb = await saveSystemSettings(client, systemSettings);
+  const io = req.app.get("io");
   
+  // 3. If RANK_CONFIG was updated, synchronize user limits if they are tied to ranks
+  if (newConfig.RANK_CONFIG) {
+    try {
+      const rankConfig = Array.isArray(newConfig.RANK_CONFIG) 
+        ? newConfig.RANK_CONFIG 
+        : (typeof newConfig.RANK_CONFIG === 'string' ? JSON.parse(newConfig.RANK_CONFIG) : null);
+
+      if (Array.isArray(rankConfig)) {
+        for (const rank of rankConfig) {
+        if (rank.id && rank.maxLimit !== undefined) {
+          // Get users who need update (whose current totalLimit differs from new rank limit)
+          const { data: usersToUpdate, error: fetchError } = await client
+            .from('users')
+            .select('id, totalLimit, balance')
+            .eq('rank', rank.id);
+
+          if (!fetchError && usersToUpdate && usersToUpdate.length > 0) {
+            const updates = usersToUpdate
+              .filter(u => Number(u.totalLimit) !== Number(rank.maxLimit))
+              .map(u => {
+                const currentLimit = Number(u.totalLimit) || 0;
+                const newLimit = Number(rank.maxLimit) || 0;
+                const currentBalance = Number(u.balance) || 0;
+                const limitDiff = newLimit - currentLimit;
+                
+                return {
+                  id: u.id,
+                  totalLimit: newLimit,
+                  balance: currentBalance + limitDiff,
+                  updatedAt: Date.now()
+                };
+              });
+
+            if (updates.length > 0) {
+              const sanitizedUpdates = sanitizeData(updates, USER_COLUMNS, 'users_rank_sync');
+              if (sanitizedUpdates.length > 0) {
+                console.log(`[SETTINGS] Starting sync for ${sanitizedUpdates.length} users in rank ${rank.id}`);
+                
+                // Use individual updates instead of upsert to avoid requiring all NOT NULL columns (like phone)
+                const updatePromises = sanitizedUpdates.map(u => 
+                  client.from('users').update({
+                    totalLimit: u.totalLimit,
+                    balance: u.balance,
+                    updatedAt: u.updatedAt
+                  }).eq('id', u.id)
+                );
+                
+                const results = await Promise.all(updatePromises);
+                const errors = results.filter(r => r.error);
+                
+                if (errors.length > 0) {
+                  console.error(`[SETTINGS] Failed to update ${errors.length}/${sanitizedUpdates.length} users for rank ${rank.id}`);
+                  errors.slice(0, 3).forEach((err, i) => {
+                    console.error(`  - Update error ${i+1}:`, JSON.stringify(err.error, null, 2));
+                  });
+                } else {
+                  console.log(`[SETTINGS] Sync success: Updated ${sanitizedUpdates.length} users with rank ${rank.id} to new limit ${rank.maxLimit}`);
+                }
+              }
+            }
+          }
+        }
+      }
+        // Emit socket event to notify clients to refresh their data
+        io.emit('users_bulk_updated');
+      }
+    } catch (syncErr) {
+      console.error("[SETTINGS] Error during user rank sync:", syncErr);
+    }
+  }
+
   // Invalidate cache after save
   settingsCache = null;
   lastCacheUpdate = 0;
@@ -897,9 +969,12 @@ router.post("/settings", async (req: any, res) => {
   const fullSettings = await getMergedSettings(client);
   
   // Emit real-time update to all clients
-  const io = req.app.get("io");
   if (io) {
     io.emit("config_updated", fullSettings);
+    // Also notify about possible user updates
+    if (newConfig.RANK_CONFIG) {
+      io.emit("users_bulk_updated"); 
+    }
   }
   
   if (savedToDb) {
